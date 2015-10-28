@@ -27,7 +27,8 @@ final class ExecutorCallAdapterFactory implements CallAdapter.Factory {
     this.callbackExecutor = callbackExecutor;
   }
 
-  @Override public CallAdapter<Call<?>> get(Type returnType, Annotation[] annotations) {
+  @Override
+  public CallAdapter<Call<?>> get(Type returnType, Annotation[] annotations, Retrofit retrofit) {
     if (Utils.getRawType(returnType) != Call.class) {
       return null;
     }
@@ -79,10 +80,10 @@ final class ExecutorCallAdapterFactory implements CallAdapter.Factory {
       this.delegate = delegate;
     }
 
-    @Override public void onResponse(final Response<T> response) {
+    @Override public void onResponse(final Response<T> response, final Retrofit retrofit) {
       callbackExecutor.execute(new Runnable() {
         @Override public void run() {
-          delegate.onResponse(response);
+          delegate.onResponse(response, retrofit);
         }
       });
     }

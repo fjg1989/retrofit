@@ -15,28 +15,23 @@
  */
 package retrofit;
 
-import com.squareup.okhttp.OkHttpClient;
 import com.squareup.okhttp.ResponseBody;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
 import java.lang.reflect.Type;
-import java.util.List;
 
 final class MethodHandler<T> {
   @SuppressWarnings("unchecked")
-  static MethodHandler<?> create(Method method, OkHttpClient client, BaseUrl baseUrl,
-      List<CallAdapter.Factory> callAdapterFactories, List<Converter.Factory> converterFactories) {
-    CallAdapter<Object> callAdapter =
-        (CallAdapter<Object>) createCallAdapter(method, callAdapterFactories);
+  static MethodHandler<?> create(Retrofit retrofit, Method method) {
+    CallAdapter<Object> callAdapter = (CallAdapter<Object>) createCallAdapter(method, retrofit);
+    Type responseType = callAdapter.responseType();
     Converter<ResponseBody, Object> responseConverter =
-        (Converter<ResponseBody, Object>) createResponseConverter(method,
-            callAdapter.responseType(), converterFactories);
-    RequestFactory requestFactory = RequestFactoryParser.parse(method, baseUrl, converterFactories);
-    return new MethodHandler<>(client, requestFactory, callAdapter, responseConverter);
+        (Converter<ResponseBody, Object>) createResponseConverter(method, retrofit, responseType);
+    RequestFactory requestFactory = RequestFactoryParser.parse(method, responseType, retrofit);
+    return new MethodHandler<>(retrofit, requestFactory, callAdapter, responseConverter);
   }
 
-  private static CallAdapter<?> createCallAdapter(Method method,
-      List<CallAdapter.Factory> adapterFactories) {
+  private static CallAdapter<?> createCallAdapter(Method method, Retrofit retrofit) {
     Type returnType = method.getGenericReturnType();
     if (Utils.hasUnresolvableType(returnType)) {
       throw Utils.methodError(method,
@@ -47,36 +42,36 @@ final class MethodHandler<T> {
     }
     Annotation[] annotations = method.getAnnotations();
     try {
-      return Utils.resolveCallAdapter(adapterFactories, returnType, annotations);
+      return retrofit.callAdapter(returnType, annotations);
     } catch (RuntimeException e) { // Wide exception range because factories are user code.
       throw Utils.methodError(e, method, "Unable to create call adapter for %s", returnType);
     }
   }
 
   private static Converter<ResponseBody, ?> createResponseConverter(Method method,
-      Type responseType, List<Converter.Factory> converterFactories) {
+      Retrofit retrofit, Type responseType) {
     Annotation[] annotations = method.getAnnotations();
     try {
-      return Utils.resolveResponseBodyConverter(converterFactories, responseType, annotations);
+      return retrofit.responseConverter(responseType, annotations);
     } catch (RuntimeException e) { // Wide exception range because factories are user code.
       throw Utils.methodError(e, method, "Unable to create converter for %s", responseType);
     }
   }
 
-  private final OkHttpClient client;
+  private final Retrofit retrofit;
   private final RequestFactory requestFactory;
   private final CallAdapter<T> callAdapter;
   private final Converter<ResponseBody, T> responseConverter;
 
-  private MethodHandler(OkHttpClient client, RequestFactory requestFactory,
+  private MethodHandler(Retrofit retrofit, RequestFactory requestFactory,
       CallAdapter<T> callAdapter, Converter<ResponseBody, T> responseConverter) {
-    this.client = client;
+    this.retrofit = retrofit;
     this.requestFactory = requestFactory;
     this.callAdapter = callAdapter;
     this.responseConverter = responseConverter;
   }
 
   Object invoke(Object... args) {
-    return callAdapter.adapt(new OkHttpCall<>(client, requestFactory, responseConverter, args));
+    return callAdapter.adapt(new OkHttpCall<>(retrofit, requestFactory, responseConverter, args));
   }
 }

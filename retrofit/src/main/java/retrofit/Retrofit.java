@@ -19,9 +19,11 @@ import com.squareup.okhttp.HttpUrl;
 import com.squareup.okhttp.OkHttpClient;
 import com.squareup.okhttp.RequestBody;
 import com.squareup.okhttp.ResponseBody;
+import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -59,7 +61,7 @@ import static retrofit.Utils.checkNotNull;
  * <ul>
  * <li>{@link retrofit.http.FormUrlEncoded @FormUrlEncoded} - Form-encoded data with key-value
  * pairs specified by the {@link retrofit.http.Field @Field} parameter annotation.
- * <li>{@link retrofit.http.Multipart @Multipart} - RFC 2387-compliant multi-part data with parts
+ * <li>{@link retrofit.http.Multipart @Multipart} - RFC 2388-compliant multi-part data with parts
  * specified by the {@link retrofit.http.Part @Part} parameter annotation.
  * </ul>
  * <p>
@@ -94,20 +96,26 @@ public final class Retrofit {
   private final List<Converter.Factory> converterFactories;
   private final List<CallAdapter.Factory> adapterFactories;
   private final Executor callbackExecutor;
+  private final boolean validateEagerly;
 
   private Retrofit(OkHttpClient client, BaseUrl baseUrl, List<Converter.Factory> converterFactories,
-      List<CallAdapter.Factory> adapterFactories, Executor callbackExecutor) {
+      List<CallAdapter.Factory> adapterFactories, Executor callbackExecutor,
+      boolean validateEagerly) {
     this.client = client;
     this.baseUrl = baseUrl;
     this.converterFactories = converterFactories;
     this.adapterFactories = adapterFactories;
     this.callbackExecutor = callbackExecutor;
+    this.validateEagerly = validateEagerly;
   }
 
   /** Create an implementation of the API defined by the {@code service} interface. */
   @SuppressWarnings("unchecked") // Single-interface proxy creation guarded by parameter safety.
   public <T> T create(final Class<T> service) {
     Utils.validateServiceInterface(service);
+    if (validateEagerly) {
+      eagerlyValidateMethods(service);
+    }
     return (T) Proxy.newProxyInstance(service.getClassLoader(), new Class<?>[] { service },
         new InvocationHandler() {
           private final Platform platform = Platform.get();
@@ -126,13 +134,21 @@ public final class Retrofit {
         });
   }
 
+  private void eagerlyValidateMethods(Class<?> service) {
+    Platform platform = Platform.get();
+    for (Method method : service.getDeclaredMethods()) {
+      if (!platform.isDefaultMethod(method)) {
+        loadMethodHandler(method);
+      }
+    }
+  }
+
   MethodHandler<?> loadMethodHandler(Method method) {
     MethodHandler<?> handler;
     synchronized (methodHandlerCache) {
       handler = methodHandlerCache.get(method);
       if (handler == null) {
-        handler =
-            MethodHandler.create(method, client, baseUrl, adapterFactories, converterFactories);
+        handler = MethodHandler.create(this, method);
         methodHandlerCache.put(method, handler);
       }
     }
@@ -147,6 +163,50 @@ public final class Retrofit {
     return baseUrl;
   }
 
+  public List<CallAdapter.Factory> callAdapterFactories() {
+    return Collections.unmodifiableList(adapterFactories);
+  }
+
+  /**
+   * Returns the {@link CallAdapter} for {@code returnType} from the available {@linkplain
+   * #callAdapterFactories() factories}.
+   */
+  public CallAdapter<?> callAdapter(Type returnType, Annotation[] annotations) {
+    return nextCallAdapter(null, returnType, annotations);
+  }
+
+  /**
+   * Returns the {@link CallAdapter} for {@code returnType} from the available {@linkplain
+   * #callAdapterFactories() factories} except {@code skipPast}.
+   */
+  public CallAdapter<?> nextCallAdapter(CallAdapter.Factory skipPast, Type returnType,
+      Annotation[] annotations) {
+    checkNotNull(returnType, "returnType == null");
+    checkNotNull(annotations, "annotations == null");
+
+    int start = adapterFactories.indexOf(skipPast) + 1;
+    for (int i = start, count = adapterFactories.size(); i < count; i++) {
+      CallAdapter<?> adapter = adapterFactories.get(i).get(returnType, annotations, this);
+      if (adapter != null) {
+        return adapter;
+      }
+    }
+
+    StringBuilder builder = new StringBuilder("Could not locate call adapter for ")
+        .append(returnType)
+        .append(". Tried:");
+    for (int i = start, count = adapterFactories.size(); i < count; i++) {
+      builder.append("\n * ").append(adapterFactories.get(i).getClass().getName());
+    }
+    if (skipPast != null) {
+      builder.append("\nSkipped:");
+      for (int i = 0; i < start; i++) {
+        builder.append("\n * ").append(adapterFactories.get(i).getClass().getName());
+      }
+    }
+    throw new IllegalArgumentException(builder.toString());
+  }
+
   /**
    * TODO
    */
@@ -154,8 +214,56 @@ public final class Retrofit {
     return Collections.unmodifiableList(converterFactories);
   }
 
-  public List<CallAdapter.Factory> callAdapterFactories() {
-    return Collections.unmodifiableList(adapterFactories);
+  /**
+   * Returns a {@link Converter} for {@code type} to {@link RequestBody} from the available
+   * {@linkplain #converterFactories() factories}.
+   */
+  public <T> Converter<T, RequestBody> requestConverter(Type type, Annotation[] annotations) {
+    checkNotNull(type, "type == null");
+    checkNotNull(annotations, "annotations == null");
+
+    for (int i = 0, count = converterFactories.size(); i < count; i++) {
+      Converter<?, RequestBody> converter =
+          converterFactories.get(i).toRequestBody(type, annotations);
+      if (converter != null) {
+        //noinspection unchecked
+        return (Converter<T, RequestBody>) converter;
+      }
+    }
+
+    StringBuilder builder = new StringBuilder("Could not locate RequestBody converter for ")
+        .append(type)
+        .append(". Tried:");
+    for (Converter.Factory converterFactory : converterFactories) {
+      builder.append("\n * ").append(converterFactory.getClass().getName());
+    }
+    throw new IllegalArgumentException(builder.toString());
+  }
+
+  /**
+   * Returns a {@link Converter} for {@link ResponseBody} to {@code type} from the available
+   * {@linkplain #converterFactories() factories}.
+   */
+  public <T> Converter<ResponseBody, T> responseConverter(Type type, Annotation[] annotations) {
+    checkNotNull(type, "type == null");
+    checkNotNull(annotations, "annotations == null");
+
+    for (int i = 0, count = converterFactories.size(); i < count; i++) {
+      Converter<ResponseBody, ?> converter =
+          converterFactories.get(i).fromResponseBody(type, annotations);
+      if (converter != null) {
+        //noinspection unchecked
+        return (Converter<ResponseBody, T>) converter;
+      }
+    }
+
+    StringBuilder builder = new StringBuilder("Could not locate ResponseBody converter for ")
+        .append(type)
+        .append(". Tried:");
+    for (Converter.Factory converterFactory : converterFactories) {
+      builder.append("\n * ").append(converterFactory.getClass().getName());
+    }
+    throw new IllegalArgumentException(builder.toString());
   }
 
   public Executor callbackExecutor() {
@@ -174,11 +282,12 @@ public final class Retrofit {
     private List<Converter.Factory> converterFactories = new ArrayList<>();
     private List<CallAdapter.Factory> adapterFactories = new ArrayList<>();
     private Executor callbackExecutor;
+    private boolean validateEagerly;
 
     public Builder() {
       // Add the built-in converter factory first. This prevents overriding its behavior but also
       // ensures correct behavior when using converters that consume all types.
-      converterFactories.add(new BuiltInConverterFactory());
+      converterFactories.add(new BuiltInConverters());
     }
 
     /** The HTTP client used for requests. */
@@ -236,6 +345,15 @@ public final class Retrofit {
       return this;
     }
 
+    /**
+     * When calling {@link #create} on the resulting {@link Retrofit} instance, eagerly validate
+     * the configuration of all methods in the supplied interface.
+     */
+    public Builder validateEagerly() {
+      validateEagerly = true;
+      return this;
+    }
+
     /** Create the {@link Retrofit} instances. */
     public Retrofit build() {
       if (baseUrl == null) {
@@ -254,7 +372,8 @@ public final class Retrofit {
       // Make a defensive copy of the converters.
       List<Converter.Factory> converterFactories = new ArrayList<>(this.converterFactories);
 
-      return new Retrofit(client, baseUrl, converterFactories, adapterFactories, callbackExecutor);
+      return new Retrofit(client, baseUrl, converterFactories, adapterFactories, callbackExecutor,
+          validateEagerly);
     }
   }
 }

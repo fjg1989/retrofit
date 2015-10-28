@@ -20,6 +20,7 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import rx.Observable;
 import rx.Subscriber;
+import rx.exceptions.Exceptions;
 import rx.functions.Action0;
 import rx.functions.Func1;
 import rx.subscriptions.Subscriptions;
@@ -38,7 +39,8 @@ public final class RxJavaCallAdapterFactory implements CallAdapter.Factory {
   private RxJavaCallAdapterFactory() {
   }
 
-  @Override public CallAdapter<?> get(Type returnType, Annotation[] annotations) {
+  @Override
+  public CallAdapter<?> get(Type returnType, Annotation[] annotations, Retrofit retrofit) {
     Class<?> rawType = Utils.getRawType(returnType);
     boolean isSingle = "rx.Single".equals(rawType.getCanonicalName());
     if (rawType != Observable.class && !isSingle) {
@@ -101,27 +103,22 @@ public final class RxJavaCallAdapterFactory implements CallAdapter.Factory {
         }
       }));
 
-      call.enqueue(new Callback<T>() {
-        @Override public void onResponse(Response<T> response) {
-          if (subscriber.isUnsubscribed()) {
-            return;
-          }
-          try {
-            subscriber.onNext(response);
-          } catch (Throwable t) {
-            subscriber.onError(t);
-            return;
-          }
-          subscriber.onCompleted();
+      try {
+        Response<T> response = call.execute();
+        if (!subscriber.isUnsubscribed()) {
+          subscriber.onNext(response);
         }
-
-        @Override public void onFailure(Throwable t) {
-          if (subscriber.isUnsubscribed()) {
-            return;
-          }
+      } catch (Throwable t) {
+        Exceptions.throwIfFatal(t);
+        if (!subscriber.isUnsubscribed()) {
           subscriber.onError(t);
         }
-      });
+        return;
+      }
+
+      if (!subscriber.isUnsubscribed()) {
+        subscriber.onCompleted();
+      }
     }
   }
 
